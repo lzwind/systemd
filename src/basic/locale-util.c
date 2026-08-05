@@ -227,6 +227,27 @@ static int add_locales_for_musl(Set *locales) {
 }
 #endif
 
+static bool locale_uses_utf8(const char *name) {
+        /* Quick check based on the locale name: if it explicitly mentions UTF-8, it's UTF-8. */
+        if (endswith(name, "UTF-8") || strstr(name, ".UTF-8@"))
+                return true;
+
+        /* For locale names without an explicit charset (e.g. "mn_MN"), query the actual
+         * codeset via newlocale() + nl_langinfo_l(). */
+#ifdef __GLIBC__
+        _cleanup_(freelocalep) locale_t loc = newlocale(LC_CTYPE_MASK, name, (locale_t) 0);
+        if (loc == (locale_t) 0)
+                return false;
+
+        const char *codeset = nl_langinfo_l(CODESET, loc);
+        return codeset && streq(codeset, "UTF-8");
+#else
+        /* On musl, newlocale() always succeeds, so we cannot reliably check the actual
+         * codeset. Fall back to the name-based check. */
+        return false;
+#endif
+}
+
 int get_locales(char ***ret) {
         _cleanup_set_free_ Set *locales = NULL;
         int r;
@@ -269,10 +290,13 @@ int get_locales(char ***ret) {
                 if (!IN_SET(r, -ENXIO, 0))
                         log_debug_errno(r, "Failed to parse $SYSTEMD_LIST_NON_UTF8_LOCALES as boolean, ignoring: %m");
 
-                /* Filter out non-UTF-8 locales, because it's 2019, by default */
+                /* Filter out non-UTF-8 locales, because it's 2019, by default. Locale names
+                 * that contain "UTF-8" (e.g. "en_US.UTF-8") are kept. For locale names that
+                 * do not contain the charset explicitly (e.g. "mn_MN"), check the actual
+                 * codeset of the locale. */
                 char **b = l;
                 STRV_FOREACH(a, l)
-                        if (endswith(*a, "UTF-8") || strstr(*a, ".UTF-8@"))
+                        if (locale_uses_utf8(*a))
                                 *(b++) = *a;
                         else
                                 free(*a);
